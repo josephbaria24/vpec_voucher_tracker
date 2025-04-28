@@ -7,6 +7,7 @@ import os
 import calendar
 import pytz
 import hashlib
+import matplotlib.pyplot as plt
 
 # --- Auto-refresh if trigger.txt changes ---
 def hash_file(filepath):
@@ -92,7 +93,11 @@ def count_vouchers_by_cluster_and_campus(voucher_logs):
     return counts
 
 # --- Streamlit UI ---
-st.set_page_config(layout="centered")
+st.set_page_config(
+    page_title="VPEC Voucher Tracker",
+    page_icon="favicon.ico",
+    layout="wide"
+)
 st.title("📋 VPEC Voucher Monitor")
 
 # --- State tracking for navigation ---
@@ -105,7 +110,6 @@ view_voucher_button = st.button("🔎 View All Vouchers")
 if view_voucher_button:
     # Set session state to navigate to the vouchers page
     st.session_state['view_vouchers'] = True
-    # Removed st.experimental_rerun()
 
 # --- Sidebar: Filter by Date ---
 with st.sidebar:
@@ -131,50 +135,121 @@ with st.sidebar:
                 if count > 0:
                     st.markdown(f"- **{campus}**: {count}")
 
-# --- Input Section ---
+# --- Input Section and Chart in a Row ---
 if not st.session_state['view_vouchers']:
-    st.subheader("📥 Add Voucher")
+    # Create two columns for the layout
+    left_col, right_col = st.columns([1, 1])
+    
+    # Left column: Add Voucher form
+    with left_col:
+        st.subheader("📥 Add Voucher")
 
-    # Dropdown for campus selection
-    all_campuses = [campus for campuses in cluster_map.values() for campus in campuses]
-    selected_campus = st.selectbox("Select Campus:", options=sorted(all_campuses))
+        # Dropdown for campus selection
+        all_campuses = [campus for campuses in cluster_map.values() for campus in campuses]
+        selected_campus = st.selectbox("Select Campus:", options=sorted(all_campuses))
 
-    # Text input for transaction number
-    transaction_number = st.text_input("Enter Transaction Number:")
+        # Text input for transaction number
+        transaction_number = st.text_input("Enter Transaction Number:")
 
-    # Optional date input (default to today)
-    selected_date = st.date_input("Select Date (optional):", value=now_ph.date())
+        # Optional date input (default to today)
+        selected_date = st.date_input("Select Date (optional):", value=now_ph.date())
 
-    submit = st.button("Submit Voucher")
+        submit = st.button("Submit Voucher")
 
-    if submit:
-        if selected_campus and transaction_number.strip():
-            # Use selected date or fallback to current date
-            if selected_date:
-                timestamp = datetime.combine(selected_date, now_ph.time()).strftime("%Y-%m-%d %H:%M:%S")
+        if submit:
+            if selected_campus and transaction_number.strip():
+                # Use selected date or fallback to current date
+                if selected_date:
+                    timestamp = datetime.combine(selected_date, now_ph.time()).strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    timestamp = datetime.now(ph_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+                cluster = campus_to_cluster.get(selected_campus.lower(), "Unknown")
+                voucher_text = f"{selected_campus} - {transaction_number}"
+
+                if cluster != "Unknown":
+                    update_cluster_count(cluster)
+
+                    # Insert into Supabase
+                    supabase.table("voucher_logs").insert({
+                        "cluster": cluster,
+                        "text": voucher_text,
+                        "timestamp": timestamp
+                    }).execute()
+
+                    st.success("✅ Voucher added successfully!")
+                    st.write("### 📄 Voucher Details")
+                    st.write(f"➡️ **{cluster}**: {voucher_text} _(added on {timestamp})_")
+                else:
+                    st.error("❌ Unable to determine cluster for selected campus.")
             else:
-                timestamp = datetime.now(ph_tz).strftime("%Y-%m-%d %H:%M:%S")
-
-            cluster = campus_to_cluster.get(selected_campus.lower(), "Unknown")
-            voucher_text = f"{selected_campus} - {transaction_number}"
-
-            if cluster != "Unknown":
-                update_cluster_count(cluster)
-
-                # Insert into Supabase
-                supabase.table("voucher_logs").insert({
-                    "cluster": cluster,
-                    "text": voucher_text,
-                    "timestamp": timestamp
-                }).execute()
-
-                st.success("✅ Voucher added successfully!")
-                st.write("### 📄 Voucher Details")
-                st.write(f"➡️ **{cluster}**: {voucher_text} _(added on {timestamp})_")
-            else:
-                st.error("❌ Unable to determine cluster for selected campus.")
+                st.warning("⚠️ Please select a campus and enter a transaction number before submitting.")
+    
+    # Right column: Voucher Trends chart
+    with right_col:
+        st.subheader("📊 Voucher Trends")
+        
+        # Get actual data from Supabase/selected filters for the chart
+        # Use the filtered logs or get all data if needed
+        if selected_month_name == "All":
+            chart_logs = get_voucher_logs_by_date(year=selected_year)
         else:
-            st.warning("⚠️ Please select a campus and enter a transaction number before submitting.")
+            month_number = month_names.index(selected_month_name)
+            chart_logs = get_voucher_logs_by_date(year=selected_year, month=month_number)
+        
+        # Count vouchers per cluster for the radar chart
+        cluster_counts = {}
+        for log in chart_logs:
+            cluster = log.get("cluster", "Unknown")
+            if cluster not in cluster_counts:
+                cluster_counts[cluster] = 0
+            cluster_counts[cluster] += 1
+        
+        # Prepare data for radar chart
+        labels = list(cluster_map.keys())  # Get all cluster names
+        values = [cluster_counts.get(cluster, 0) for cluster in labels]  # Get counts, default 0 if no data
+        
+        # Create a figure and axes explicitly for radar chart
+        fig, ax = plt.subplots(figsize=(6, 4), subplot_kw=dict(polar=True))
+        
+        # Number of variables
+        N = len(labels)
+        
+        # What will be the angle of each axis in the plot
+        angles = [n / float(N) * 2 * 3.14159 for n in range(N)]
+        angles += angles[:1]  # Close the loop
+        
+        # Values need to be repeated to close the loop as well
+        values_for_plot = values.copy()
+        values_for_plot += values_for_plot[:1]
+        
+        # Draw the chart
+        ax.plot(angles, values_for_plot, linewidth=1, linestyle='solid')
+        ax.fill(angles, values_for_plot, alpha=0.1)
+        
+        # Fix axis to go in the right order and start at 12 o'clock
+        ax.set_theta_offset(3.14159 / 2)
+        ax.set_theta_direction(-1)
+        
+        # Set labels and ticks - using shortened cluster names for better readability
+        short_labels = [label.split(' - ')[0] if ' - ' in label else label for label in labels]
+        plt.xticks(angles[:-1], short_labels)
+        
+        # Calculate appropriate y-ticks based on actual data
+        max_value = max(values) if values else 10
+        y_ticks = [int(max_value * i / 5) for i in range(1, 6)]
+        
+        # Draw y-axis labels
+        ax.set_rlabel_position(0)
+        plt.yticks(y_ticks, color="grey", size=7)
+        plt.ylim(0, max_value * 1.2)  # Set y limit with some headroom
+        
+        # Add title
+        plt.title("Voucher Distribution by Cluster", size=11, y=1.1)
+        
+        # Display the plot using st.pyplot() with the figure
+        st.pyplot(fig)
+
 
 # --- Cluster and Voucher Management Section ---
 if st.session_state['view_vouchers']:
@@ -183,6 +258,7 @@ if st.session_state['view_vouchers']:
     # --- "Back to Home" Button ---
     if st.button("🏠 Back to Home"):
         st.session_state['view_vouchers'] = False  # Go back to the voucher input section
+        st.rerun()
     
     # Fetch all voucher logs
     all_vouchers = supabase.table("voucher_logs").select("*").order("timestamp", desc=True).execute()
@@ -196,20 +272,24 @@ if st.session_state['view_vouchers']:
             cluster_vouchers[cluster_name] = []
         cluster_vouchers[cluster_name].append(voucher)
 
-    # Show table of clusters
-    st.subheader("📊 Clusters Overview")
+    # Create two sections: one for vouchers, one for chart
+    col1, col2 = st.columns([2, 1])
 
-    for cluster_name, vouchers in cluster_vouchers.items():
-        with st.expander(f"{cluster_name} ({len(vouchers)} vouchers)") :
-            for voucher in vouchers:
-                col1, col2, col3 = st.columns([5, 2, 2])
-                with col1:
-                    st.markdown(f"**{voucher['text']}**  \n`{voucher['timestamp']}`")
-                with col2:
-                    if st.button("✏️ Edit", key=f"edit_button_{voucher['id']}"):
-                        # Handle editing logic here
-                        pass
-                with col3:
-                    if st.button("🗑️ Delete", key=f"delete_button_{voucher['id']}"):
-                        supabase.table("voucher_logs").delete().eq("id", voucher['id']).execute()
-                        st.error("Deleted successfully!")
+    # Left column: Voucher and cluster data
+    with col1:
+        st.subheader("📊 Clusters Overview")
+
+        for cluster_name, vouchers in cluster_vouchers.items():
+            with st.expander(f"{cluster_name} ({len(vouchers)} vouchers)") :
+                for voucher in vouchers:
+                    col1, col2, col3 = st.columns([5, 2, 2])
+                    with col1:
+                        st.markdown(f"**{voucher['text']}**  \n`{voucher['timestamp']}`")
+                    with col2:
+                        if st.button("✏️ Edit", key=f"edit_button_{voucher['id']}"):
+                            # Handle editing logic here
+                            pass
+                    with col3:
+                        if st.button("🗑️ Delete", key=f"delete_button_{voucher['id']}"):
+                            supabase.table("voucher_logs").delete().eq("id", voucher['id']).execute()
+                            st.error("Deleted successfully!")
