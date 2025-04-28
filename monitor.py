@@ -7,7 +7,6 @@ import os
 import calendar
 import pytz
 import hashlib
-from streamlit_autorefresh import st_autorefresh
 
 # --- Auto-refresh if trigger.txt changes ---
 def hash_file(filepath):
@@ -20,7 +19,7 @@ last_trigger_hash = st.session_state.get("last_trigger_hash", "")
 
 if trigger_hash != last_trigger_hash:
     st.session_state["last_trigger_hash"] = trigger_hash
-    st.rerun()
+    # Removed st.rerun(), session state should handle updates without rerun
 
 # Supabase credentials
 SUPABASE_URL = "https://ibromwvqvxxmkphxpiae.supabase.co"
@@ -96,7 +95,17 @@ def count_vouchers_by_cluster_and_campus(voucher_logs):
 st.set_page_config(layout="centered")
 st.title("📋 VPEC Voucher Monitor")
 
-cluster_counts = get_cluster_counts()
+# --- State tracking for navigation ---
+if 'view_vouchers' not in st.session_state:
+    st.session_state['view_vouchers'] = False
+
+# --- "View All Voucher" Button ---
+view_voucher_button = st.button("🔎 View All Vouchers")
+
+if view_voucher_button:
+    # Set session state to navigate to the vouchers page
+    st.session_state['view_vouchers'] = True
+    # Removed st.experimental_rerun()
 
 # --- Sidebar: Filter by Date ---
 with st.sidebar:
@@ -117,94 +126,90 @@ with st.sidebar:
     st.header("📊 Voucher Clusters")
     for cluster, campus_counts in cluster_campus_counts.items():
         total = sum(campus_counts.values())
-        with st.expander(f"{cluster} ({total} vouchers)"):
+        with st.expander(f"{cluster} ({total} vouchers)") :
             for campus, count in campus_counts.items():
                 if count > 0:
                     st.markdown(f"- **{campus}**: {count}")
 
 # --- Input Section ---
-st.subheader("📥 Add Voucher")
+if not st.session_state['view_vouchers']:
+    st.subheader("📥 Add Voucher")
 
-# Dropdown for campus selection
-all_campuses = [campus for campuses in cluster_map.values() for campus in campuses]
-selected_campus = st.selectbox("Select Campus:", options=sorted(all_campuses))
+    # Dropdown for campus selection
+    all_campuses = [campus for campuses in cluster_map.values() for campus in campuses]
+    selected_campus = st.selectbox("Select Campus:", options=sorted(all_campuses))
 
-# Text input for transaction number
-transaction_number = st.text_input("Enter Transaction Number:")
+    # Text input for transaction number
+    transaction_number = st.text_input("Enter Transaction Number:")
 
-# Optional date input (default to today)
-selected_date = st.date_input("Select Date (optional):", value=now_ph.date())
+    # Optional date input (default to today)
+    selected_date = st.date_input("Select Date (optional):", value=now_ph.date())
 
-submit = st.button("Submit Voucher")
+    submit = st.button("Submit Voucher")
 
-if submit:
-    if selected_campus and transaction_number.strip():
-        # Use selected date or fallback to current date
-        if selected_date:
-            timestamp = datetime.combine(selected_date, now_ph.time()).strftime("%Y-%m-%d %H:%M:%S")
+    if submit:
+        if selected_campus and transaction_number.strip():
+            # Use selected date or fallback to current date
+            if selected_date:
+                timestamp = datetime.combine(selected_date, now_ph.time()).strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                timestamp = datetime.now(ph_tz).strftime("%Y-%m-%d %H:%M:%S")
+
+            cluster = campus_to_cluster.get(selected_campus.lower(), "Unknown")
+            voucher_text = f"{selected_campus} - {transaction_number}"
+
+            if cluster != "Unknown":
+                update_cluster_count(cluster)
+
+                # Insert into Supabase
+                supabase.table("voucher_logs").insert({
+                    "cluster": cluster,
+                    "text": voucher_text,
+                    "timestamp": timestamp
+                }).execute()
+
+                st.success("✅ Voucher added successfully!")
+                st.write("### 📄 Voucher Details")
+                st.write(f"➡️ **{cluster}**: {voucher_text} _(added on {timestamp})_")
+            else:
+                st.error("❌ Unable to determine cluster for selected campus.")
         else:
-            timestamp = datetime.now(ph_tz).strftime("%Y-%m-%d %H:%M:%S")
-
-        cluster = campus_to_cluster.get(selected_campus.lower(), "Unknown")
-        voucher_text = f"{selected_campus} - {transaction_number}"
-
-        if cluster != "Unknown":
-            update_cluster_count(cluster)
-
-            # Insert into Supabase
-            supabase.table("voucher_logs").insert({
-                "cluster": cluster,
-                "text": voucher_text,
-                "timestamp": timestamp
-            }).execute()
-
-            st.success("✅ Voucher added successfully!")
-            st.write("### 📄 Voucher Details")
-            st.write(f"➡️ **{cluster}**: {voucher_text} _(added on {timestamp})_")
-        else:
-            st.error("❌ Unable to determine cluster for selected campus.")
-    else:
-        st.warning("⚠️ Please select a campus and enter a transaction number before submitting.")
+            st.warning("⚠️ Please select a campus and enter a transaction number before submitting.")
 
 # --- Cluster and Voucher Management Section ---
-st.title("🗂️ Cluster and Voucher Management")
+if st.session_state['view_vouchers']:
+    st.title("🗂️ Cluster and Voucher Management")
 
-# Fetch all voucher logs
-all_vouchers = supabase.table("voucher_logs").select("*").order("timestamp", desc=True).execute()
-vouchers_data = all_vouchers.data if all_vouchers.data else []
+    # --- "Back to Home" Button ---
+    if st.button("🏠 Back to Home"):
+        st.session_state['view_vouchers'] = False  # Go back to the voucher input section
+    
+    # Fetch all voucher logs
+    all_vouchers = supabase.table("voucher_logs").select("*").order("timestamp", desc=True).execute()
+    vouchers_data = all_vouchers.data if all_vouchers.data else []
 
-# Organize vouchers by cluster
-cluster_vouchers = {}
-for voucher in vouchers_data:
-    cluster_name = voucher.get("cluster", "Unknown")
-    if cluster_name not in cluster_vouchers:
-        cluster_vouchers[cluster_name] = []
-    cluster_vouchers[cluster_name].append(voucher)
+    # Organize vouchers by cluster
+    cluster_vouchers = {}
+    for voucher in vouchers_data:
+        cluster_name = voucher.get("cluster", "Unknown")
+        if cluster_name not in cluster_vouchers:
+            cluster_vouchers[cluster_name] = []
+        cluster_vouchers[cluster_name].append(voucher)
 
-# Show table of clusters
-st.subheader("📊 Clusters Overview")
+    # Show table of clusters
+    st.subheader("📊 Clusters Overview")
 
-for cluster_name, vouchers in cluster_vouchers.items():
-    with st.expander(f"{cluster_name} ({len(vouchers)} vouchers)"):
-        for voucher in vouchers:
-            col1, col2, col3 = st.columns([5, 2, 2])
-            with col1:
-                if "edit_mode" not in voucher:
+    for cluster_name, vouchers in cluster_vouchers.items():
+        with st.expander(f"{cluster_name} ({len(vouchers)} vouchers)") :
+            for voucher in vouchers:
+                col1, col2, col3 = st.columns([5, 2, 2])
+                with col1:
                     st.markdown(f"**{voucher['text']}**  \n`{voucher['timestamp']}`")
-                else:
-                    new_text = st.text_input(f"Edit Transaction for {voucher['id']}", value=voucher["text"], key=f"edit_{voucher['id']}")
-            with col2:
-                if "edit_mode" not in voucher:
+                with col2:
                     if st.button("✏️ Edit", key=f"edit_button_{voucher['id']}"):
-                        voucher["edit_mode"] = True
-                        st.experimental_rerun()
-                else:
-                    if st.button("✅ Save", key=f"save_button_{voucher['id']}"):
-                        supabase.table("voucher_logs").update({"text": new_text}).eq("id", voucher["id"]).execute()
-                        st.success("Updated successfully!")
-                        st.experimental_rerun()
-            with col3:
-                if st.button("🗑️ Delete", key=f"delete_button_{voucher['id']}"):
-                    supabase.table("voucher_logs").delete().eq("id", voucher["id"]).execute()
-                    st.error("Deleted successfully!")
-                    st.experimental_rerun()
+                        # Handle editing logic here
+                        pass
+                with col3:
+                    if st.button("🗑️ Delete", key=f"delete_button_{voucher['id']}"):
+                        supabase.table("voucher_logs").delete().eq("id", voucher['id']).execute()
+                        st.error("Deleted successfully!")
